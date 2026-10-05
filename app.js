@@ -35,7 +35,7 @@ function generateCommandId() {
 
 function getWebSocketUrl() {
 
-    return 'ws://localhost:1880/home/dashboard';
+    return 'wss://headed-spooky-snowstorm.ngrok-free.dev/home/dashboard';
 }
 
 
