@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IoT Research Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Dashboard Heading -->
+    <h1>IoT Research Dashboard</h1>
+
+    <!-- Four Sensor Cards -->
+    <div class="grid-sensors">
+      <div class="card">
+        <div class="card-label">Temperature</div>
+        <div class="card-value" id="temperature-val">-- °C</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Humidity</div>
+        <div class="card-value" id="humidity-val">-- %</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Gas</div>
+        <div class="card-value" id="gas-val">--</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Flame</div>
+        <div class="card-value" id="flame-val">--</div>
+      </div>
+    </div>
+
+    <!-- Four Relay Controls -->
+    <div class="grid-relays" style="margin-top: 24px;">
+      <div class="relay-card">
+        <div class="relay-header">
+          <span class="relay-label">Relay 1</span>
+          <span class="relay-state-text" id="relay-1-text">OFF</span>
+        </div>
+        <label class="switch" for="relay-1">
+          <input type="checkbox" id="relay-1">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="relay-card">
+        <div class="relay-header">
+          <span class="relay-label">Relay 2</span>
+          <span class="relay-state-text" id="relay-2-text">OFF</span>
+        </div>
+        <label class="switch" for="relay-2">
+          <input type="checkbox" id="relay-2">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="relay-card">
+        <div class="relay-header">
+          <span class="relay-label">Relay 3</span>
+          <span class="relay-state-text" id="relay-3-text">OFF</span>
+        </div>
+        <label class="switch" for="relay-3">
+          <input type="checkbox" id="relay-3">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="relay-card">
+        <div class="relay-header">
+          <span class="relay-label">Relay 4</span>
+          <span class="relay-state-text" id="relay-4-text">OFF</span>
+        </div>
+        <label class="switch" for="relay-4">
+          <input type="checkbox" id="relay-4">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Small WebSocket Connection Status -->
+    <div class="connection-status">
+      WebSocket: <span class="status-indicator" id="connection-status">Disconnected</span>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
