@@ -1,32 +1,85 @@
 /**
+ * ============================================================
  * IoT Research Paper Dashboard - Client Logic
- * Plain JavaScript (ES6+), zero external dependencies.
+ * ============================================================
+ *
+ * Communication:
+ *
+ * Browser
+ *    ↓
+ * WebSocket
+ *    ↓
+ * Node-RED
+ *    ↓
+ * MQTT / HiveMQ
+ *    ↓
+ * ESP32
+ *
+ * Relay status:
+ *
+ * ESP32
+ *    ↓
+ * MQTT / HiveMQ
+ *    ↓
+ * Node-RED Status Function
+ *    ↓
+ * WebSocket
+ *    ↓
+ * Browser
+ *
+ * Latency:
+ *
+ * Browser calculates:
+ *
+ * End-to-End Latency =
+ * Status Received Time - Command Sent Time
+ *
+ * Then browser sends the calculated latency to:
+ *
+ * smart/home/latency/report
+ *
+ * ============================================================
  */
 
+
+/* ============================================================
+   GLOBAL VARIABLES
+   ============================================================ */
+
 let socket = null;
+
 let reconnectTimer = null;
 
 const RECONNECT_DELAY_MS = 3000;
 
-const pendingCommands = new Map();
-
 const COMMAND_TIMEOUT_MS = 10000;
 
-function generateCommandId() {
 
-    if (
-        window.crypto &&
-        typeof window.crypto.randomUUID === 'function'
-    ) {
-        return window.crypto.randomUUID();
-    }
+/*
+ * Stores commands that are waiting for
+ * the matching relay_status response.
+ *
+ * command_id -> {
+ *     relay,
+ *     command,
+ *     startTime,
+ *     requestedState
+ * }
+ */
+const pendingCommands = new Map();
 
-    return (
-        Date.now().toString(36) +
-        '-' +
-        Math.random().toString(36).substring(2, 10)
-    );
-}
+
+/*
+ * Stores completed latency measurements.
+ */
+let latencySamples = [];
+
+
+/*
+ * Maximum number of latency records
+ * stored in browser localStorage.
+ */
+const MAX_LATENCY_SAMPLES = 1000;
 
 
 /* ============================================================
@@ -36,6 +89,7 @@ function generateCommandId() {
 function getWebSocketUrl() {
 
     return 'wss://headed-spooky-snowstorm.ngrok-free.dev/home/dashboard';
+
 }
 
 
@@ -46,35 +100,88 @@ function getWebSocketUrl() {
 function updateConnectionStatus(status) {
 
     const statusEl =
-        document.getElementById('connection-status');
-
-    if (!statusEl) return;
-
-    statusEl.textContent = status;
-
-    if (status === 'Connected') {
-
-        statusEl.classList.add('connected');
-
-    } else {
-
-        statusEl.classList.remove('connected');
-    }
-}
+        document.getElementById(
+            'connection-status'
+        );
 
 
-/* ============================================================
-   SENSOR DATA UPDATE
-   ============================================================ */
-
-function updateSensorData(data) {
-
-    if (!data || typeof data !== 'object') {
+    if (!statusEl) {
         return;
     }
 
 
-    /* TEMPERATURE */
+    statusEl.textContent = status;
+
+
+    if (status === 'Connected') {
+
+        statusEl.classList.add(
+            'connected'
+        );
+
+    } else {
+
+        statusEl.classList.remove(
+            'connected'
+        );
+
+    }
+
+}
+
+
+/* ============================================================
+   GENERATE UNIQUE COMMAND ID
+   ============================================================ */
+
+function generateCommandId() {
+
+    /*
+     * Preferred method.
+     */
+    if (
+        window.crypto &&
+        typeof window.crypto.randomUUID === 'function'
+    ) {
+
+        return window.crypto.randomUUID();
+
+    }
+
+
+    /*
+     * Fallback method.
+     */
+    return (
+        Date.now().toString(36) +
+        '-' +
+        Math.random()
+            .toString(36)
+            .substring(2, 10)
+    );
+
+}
+
+
+/* ============================================================
+   UPDATE TEMPERATURE / HUMIDITY / GAS / FLAME
+   ============================================================ */
+
+function updateSensorData(data) {
+
+    if (
+        !data ||
+        typeof data !== 'object'
+    ) {
+
+        return;
+
+    }
+
+
+    /* --------------------------------------------------------
+       Temperature
+       -------------------------------------------------------- */
 
     if (
         data.temperature !== undefined &&
@@ -82,17 +189,24 @@ function updateSensorData(data) {
     ) {
 
         const tempEl =
-            document.getElementById('temperature-val');
+            document.getElementById(
+                'temperature-val'
+            );
+
 
         if (tempEl) {
 
             tempEl.textContent =
                 `${data.temperature} °C`;
+
         }
+
     }
 
 
-    /* HUMIDITY */
+    /* --------------------------------------------------------
+       Humidity
+       -------------------------------------------------------- */
 
     if (
         data.humidity !== undefined &&
@@ -100,17 +214,24 @@ function updateSensorData(data) {
     ) {
 
         const humEl =
-            document.getElementById('humidity-val');
+            document.getElementById(
+                'humidity-val'
+            );
+
 
         if (humEl) {
 
             humEl.textContent =
                 `${data.humidity} %`;
+
         }
+
     }
 
 
-    /* GAS */
+    /* --------------------------------------------------------
+       Gas
+       -------------------------------------------------------- */
 
     if (
         data.gas !== undefined &&
@@ -118,17 +239,24 @@ function updateSensorData(data) {
     ) {
 
         const gasEl =
-            document.getElementById('gas-val');
+            document.getElementById(
+                'gas-val'
+            );
+
 
         if (gasEl) {
 
             gasEl.textContent =
                 `${data.gas}`;
+
         }
+
     }
 
 
-    /* FLAME */
+    /* --------------------------------------------------------
+       Flame
+       -------------------------------------------------------- */
 
     if (
         data.flame !== undefined &&
@@ -136,7 +264,10 @@ function updateSensorData(data) {
     ) {
 
         const flameEl =
-            document.getElementById('flame-val');
+            document.getElementById(
+                'flame-val'
+            );
+
 
         if (flameEl) {
 
@@ -144,68 +275,193 @@ function updateSensorData(data) {
                 data.flame
                     ? 'FLAME DETECTED'
                     : 'NO FLAME';
+
         }
+
     }
+
 }
 
 
 /* ============================================================
-   RELAY STATUS UI
+   UPDATE SINGLE RELAY UI
+   ============================================================ */
+
+function updateRelayUI(
+    relayNumber,
+    state
+) {
+
+    const stateText =
+        document.getElementById(
+            `relay-${relayNumber}-text`
+        );
+
+
+    const toggle =
+        document.getElementById(
+            `relay-${relayNumber}`
+        );
+
+
+    /* --------------------------------------------------------
+       Update relay text
+       -------------------------------------------------------- */
+
+    if (stateText) {
+
+        stateText.textContent = state;
+
+
+        if (state === 'ON') {
+
+            stateText.classList.add(
+                'on'
+            );
+
+        } else {
+
+            stateText.classList.remove(
+                'on'
+            );
+
+        }
+
+    }
+
+
+    /* --------------------------------------------------------
+       Update switch
+       -------------------------------------------------------- */
+
+    if (toggle) {
+
+        toggle.checked =
+            state === 'ON';
+
+    }
+
+}
+
+
+/* ============================================================
+   UPDATE ALL RELAY STATES
    ============================================================ */
 
 function updateRelayStatusUI(data) {
 
-    if (!data || typeof data !== 'object') {
+    if (!data) {
         return;
     }
 
-    for (let i = 1; i <= 4; i++) {
 
-        const relayKey =
+    for (
+        let i = 1;
+        i <= 4;
+        i++
+    ) {
+
+        const key =
             `relay${i}`;
 
+
         if (
-            data[relayKey] === undefined ||
-            data[relayKey] === null
+            data[key] === 'ON' ||
+            data[key] === 'OFF'
         ) {
-            continue;
-        }
 
-        const state =
-            String(data[relayKey]).toUpperCase();
-
-        const isOn =
-            state === 'ON';
-
-        const toggle =
-            document.getElementById(
-                `relay-${i}`
+            updateRelayUI(
+                i,
+                data[key]
             );
 
-        if (toggle) {
-            toggle.checked = isOn;
         }
 
-        const stateText =
-            document.getElementById(
-                `relay-${i}-text`
-            );
-
-        if (stateText) {
-
-            stateText.textContent =
-                isOn ? 'ON' : 'OFF';
-
-            if (isOn) {
-
-                stateText.classList.add('on');
-
-            } else {
-
-                stateText.classList.remove('on');
-            }
-        }
     }
+
+}
+
+
+/* ============================================================
+   SEND LATENCY REPORT TO NODE-RED
+   ============================================================ */
+
+function sendLatencyReport(measurement) {
+
+    /*
+     * The latency report is sent using the same
+     * WebSocket connection to Node-RED.
+     *
+     * Node-RED latency Function will forward it to:
+     *
+     * smart/home/latency/report
+     *
+     * with MQTT QoS 1.
+     */
+
+    if (
+        !socket ||
+        socket.readyState !== WebSocket.OPEN
+    ) {
+
+        console.warn(
+            'Latency report could not be sent: ' +
+            'WebSocket is not connected.'
+        );
+
+        return;
+
+    }
+
+
+    const latencyReport = {
+
+        type:
+            'latency_report',
+
+        command_id:
+            measurement.commandId,
+
+        latency_ms:
+            Number(
+                measurement.latencyMs.toFixed(2)
+            ),
+
+        relay:
+            measurement.relay,
+
+        command:
+            measurement.command,
+
+        measured_at:
+            new Date().toISOString()
+
+    };
+
+
+    try {
+
+        socket.send(
+            JSON.stringify(
+                latencyReport
+            )
+        );
+
+
+        console.log(
+            'Latency report sent to Node-RED:',
+            latencyReport
+        );
+
+    } catch (error) {
+
+        console.error(
+            'Failed to send latency report:',
+            error
+        );
+
+    }
+
 }
 
 
@@ -219,39 +475,66 @@ function handleRelayStatus(data) {
         !data ||
         typeof data !== 'object'
     ) {
+
         return;
+
     }
 
 
+    /*
+     * --------------------------------------------------------
+     * IMPORTANT
+     *
+     * This matches your Node-RED Status Function:
+     *
+     * command_id:
+     *     data.command_id || null
+     *
+     * --------------------------------------------------------
+     */
+
     console.log(
-        'Processing relay status:',
+        'Relay status received:',
         data
     );
 
 
     /* --------------------------------------------------------
-       Update actual relay UI
+       Update relay UI
        -------------------------------------------------------- */
 
-    updateRelayStatusUI(data);
+    updateRelayStatusUI(
+        data
+    );
 
 
     /* --------------------------------------------------------
-       Check command ID
+       Check command_id
        -------------------------------------------------------- */
 
-    if (!data.command_id) {
+    if (
+        !data.command_id
+    ) {
+
+        /*
+         * This can happen for the initial relay status
+         * sent by ESP32 after MQTT connection.
+         *
+         * It cannot be used for E2E latency.
+         */
 
         console.log(
-            'Relay status received without command_id.'
+            'Relay status has no command_id. ' +
+            'Skipping latency calculation.'
         );
 
         return;
+
     }
 
 
     /* --------------------------------------------------------
-       Find matching pending command
+       Find matching command
        -------------------------------------------------------- */
 
     const pending =
@@ -262,29 +545,44 @@ function handleRelayStatus(data) {
 
     if (!pending) {
 
-        console.log(
+        console.warn(
             'No pending command found for command_id:',
             data.command_id
         );
 
+        console.warn(
+            'Currently pending command IDs:',
+            Array.from(pendingCommands.keys())
+        );
+
         return;
+
     }
 
 
     /* --------------------------------------------------------
-       Calculate response time
+       STOP LATENCY TIMER
        -------------------------------------------------------- */
 
     const endTime =
         performance.now();
 
-    const responseTime =
+
+    /*
+     * End-to-end latency:
+     *
+     * browser receives relay_status
+     *          -
+     * browser sends relay_command
+     */
+
+    const latencyMs =
         endTime -
         pending.startTime;
 
 
     /* --------------------------------------------------------
-       Remove completed command
+       Remove command from pending list
        -------------------------------------------------------- */
 
     pendingCommands.delete(
@@ -293,29 +591,165 @@ function handleRelayStatus(data) {
 
 
     /* --------------------------------------------------------
-       Console result
+       Create latency record
        -------------------------------------------------------- */
 
-    console.log(
-        'Relay command confirmed:',
-        pending.command
+    const measurement = {
+
+        commandId:
+            data.command_id,
+
+        relay:
+            pending.relay,
+
+        command:
+            pending.command,
+
+        latencyMs:
+            latencyMs,
+
+        measuredAt:
+            new Date().toISOString()
+
+    };
+
+
+    /* --------------------------------------------------------
+       Store latency
+       -------------------------------------------------------- */
+
+    recordLatency(
+        measurement
     );
+
+
+    /* --------------------------------------------------------
+       Send measured latency back to Node-RED
+       -------------------------------------------------------- */
+
+    sendLatencyReport(
+        measurement
+    );
+
+
+    /* --------------------------------------------------------
+       Print latency in browser console
+       -------------------------------------------------------- */
+
+    console.log('');
+
+    console.log(
+        '========== END-TO-END LATENCY =========='
+    );
+
 
     console.log(
         'Command ID:',
         data.command_id
     );
 
+
+    console.log(
+        'Command:',
+        pending.command
+    );
+
+
     console.log(
         'Relay:',
         pending.relay
     );
 
+
     console.log(
-        'Response time:',
-        responseTime.toFixed(2),
+        'Latency:',
+        latencyMs.toFixed(2),
         'ms'
     );
+
+
+    console.log(
+        'Latency:',
+        (
+            latencyMs / 1000
+        ).toFixed(4),
+        'seconds'
+    );
+
+
+    console.log(
+        '========================================'
+    );
+
+
+    /* --------------------------------------------------------
+       Update optional latency display
+       -------------------------------------------------------- */
+
+    const latencyEl =
+        document.getElementById(
+            'latency-val'
+        );
+
+
+    if (latencyEl) {
+
+        latencyEl.textContent =
+            `${latencyMs.toFixed(2)} ms`;
+
+    }
+
+
+    /* --------------------------------------------------------
+       Update sample count
+       -------------------------------------------------------- */
+
+    const sampleEl =
+        document.getElementById(
+            'latency-samples'
+        );
+
+
+    if (sampleEl) {
+
+        sampleEl.textContent =
+            latencySamples.length;
+
+    }
+
+
+    /* --------------------------------------------------------
+       Update average latency
+       -------------------------------------------------------- */
+
+    const averageEl =
+        document.getElementById(
+            'latency-average'
+        );
+
+
+    if (averageEl) {
+
+        const stats =
+            getLatencyStatistics();
+
+
+        if (stats) {
+
+            averageEl.textContent =
+                `${stats.average.toFixed(2)} ms`;
+
+        }
+
+    }
+
+
+    /* --------------------------------------------------------
+       Print statistics
+       -------------------------------------------------------- */
+
+    printLatencyStatistics();
+
 }
 
 
@@ -328,8 +762,16 @@ function sendRelayCommand(
     isTurnedOn
 ) {
 
+    /* --------------------------------------------------------
+       Create command
+       -------------------------------------------------------- */
+
     const command =
-        `RELAY${relayNumber}_${isTurnedOn ? 'ON' : 'OFF'}`;
+        `RELAY${relayNumber}_${
+            isTurnedOn
+                ? 'ON'
+                : 'OFF'
+        }`;
 
 
     /* --------------------------------------------------------
@@ -342,26 +784,37 @@ function sendRelayCommand(
     ) {
 
         console.warn(
-            `WebSocket is not open. Command '${command}' was not sent.`
+            `WebSocket is not open. ` +
+            `Command '${command}' was not sent.`
         );
+
+
+        /*
+         * Restore switch because command
+         * was not actually sent.
+         */
 
         const toggle =
             document.getElementById(
                 `relay-${relayNumber}`
             );
 
+
         if (toggle) {
 
             toggle.checked =
                 !isTurnedOn;
+
         }
 
+
         return;
+
     }
 
 
     /* --------------------------------------------------------
-       CREATE COMMAND ID
+       Generate command ID
        -------------------------------------------------------- */
 
     const commandId =
@@ -369,83 +822,135 @@ function sendRelayCommand(
 
 
     /* --------------------------------------------------------
-       START RESPONSE TIMER
+       START LATENCY TIMER
        -------------------------------------------------------- */
+
+    /*
+     * performance.now() is used for measuring elapsed time.
+     *
+     * We DO NOT use:
+     *
+     * Date.now() - Date.now()
+     *
+     * because performance.now() is designed for
+     * accurate elapsed-time measurement.
+     */
 
     const startTime =
         performance.now();
 
 
     /* --------------------------------------------------------
-       CREATE JSON COMMAND
+       Create JSON command
        -------------------------------------------------------- */
 
     const packet = {
 
-        type: "relay_command",
+        type:
+            'relay_command',
 
-        command_id: commandId,
+        command_id:
+            commandId,
 
-        command: command,
+        command:
+            command,
 
-        relay: relayNumber,
+        relay:
+            relayNumber,
 
         requested_state:
             isTurnedOn
-                ? "ON"
-                : "OFF",
+                ? 'ON'
+                : 'OFF',
 
         user_command_timestamp:
             new Date().toISOString()
+
     };
 
 
     /* --------------------------------------------------------
-       SAVE COMMAND
+       Save pending command
        -------------------------------------------------------- */
 
     pendingCommands.set(
         commandId,
         {
-            relay: relayNumber,
-            command: command,
-            startTime: startTime
+
+            relay:
+                relayNumber,
+
+            command:
+                command,
+
+            requestedState:
+                isTurnedOn
+                    ? 'ON'
+                    : 'OFF',
+
+            startTime:
+                startTime
+
         }
     );
 
 
     /* --------------------------------------------------------
-       SEND JSON TO NODE-RED
+       Send JSON through WebSocket
        -------------------------------------------------------- */
 
     try {
 
         socket.send(
-            JSON.stringify(packet)
+            JSON.stringify(
+                packet
+            )
         );
 
+
         console.log(
-            "Relay command sent:",
+            'Relay command sent:',
             packet
         );
 
     } catch (error) {
 
         console.error(
-            "Failed to send relay command:",
+            'Failed to send relay command:',
             error
         );
+
 
         pendingCommands.delete(
             commandId
         );
 
+
+        /*
+         * Restore switch
+         */
+
+        const toggle =
+            document.getElementById(
+                `relay-${relayNumber}`
+            );
+
+
+        if (toggle) {
+
+            toggle.checked =
+                !isTurnedOn;
+
+        }
+
+
         return;
+
     }
 
 
     /* --------------------------------------------------------
-       UPDATE UI TEMPORARILY
+       Temporary UI update
        -------------------------------------------------------- */
 
     const stateText =
@@ -453,88 +958,500 @@ function sendRelayCommand(
             `relay-${relayNumber}-text`
         );
 
+
     if (stateText) {
 
         stateText.textContent =
-            isTurnedOn ? "ON" : "OFF";
+            isTurnedOn
+                ? 'ON'
+                : 'OFF';
+
 
         if (isTurnedOn) {
 
-            stateText.classList.add("on");
+            stateText.classList.add(
+                'on'
+            );
 
         } else {
 
-            stateText.classList.remove("on");
+            stateText.classList.remove(
+                'on'
+            );
+
         }
+
     }
 
 
     /* --------------------------------------------------------
-       RESPONSE TIMEOUT
+       Timeout
        -------------------------------------------------------- */
 
-    setTimeout(() => {
+    setTimeout(
+        () => {
 
-        if (
-            pendingCommands.has(commandId)
-        ) {
+            /*
+             * If the matching relay status has not
+             * arrived within 10 seconds, remove it.
+             */
 
-            pendingCommands.delete(
-                commandId
-            );
+            if (
+                pendingCommands.has(
+                    commandId
+                )
+            ) {
 
-            console.warn(
-                "Relay status timeout. Command ID:",
-                commandId
-            );
-        }
+                pendingCommands.delete(
+                    commandId
+                );
 
-    }, COMMAND_TIMEOUT_MS);
+
+                console.warn(
+                    'Relay response timeout.'
+                );
+
+
+                console.warn(
+                    'Command ID:',
+                    commandId
+                );
+
+
+                console.warn(
+                    'Command:',
+                    command
+                );
+
+
+                /*
+                 * Optional UI indication.
+                 */
+
+                const toggle =
+                    document.getElementById(
+                        `relay-${relayNumber}`
+                    );
+
+
+                if (toggle) {
+
+                    toggle.checked =
+                        !isTurnedOn;
+
+                }
+
+            }
+
+        },
+        COMMAND_TIMEOUT_MS
+    );
+
 }
 
 
 /* ============================================================
-   HANDLE WEBSOCKET MESSAGE
+   RECORD LATENCY SAMPLE
    ============================================================ */
 
-function handleWebSocketMessage(event) {
+function recordLatency(
+    measurement
+) {
 
-    // console.log(
-    //     "RAW WEBSOCKET MESSAGE:",
-    //     event.data
-    // );
+    if (
+        !measurement ||
+        !Number.isFinite(
+            measurement.latencyMs
+        )
+    ) {
 
-    if (!event || !event.data) {
         return;
+
     }
 
-    let payload;
+
+    latencySamples.push(
+        measurement
+    );
+
+
+    /* --------------------------------------------------------
+       Keep maximum number of records
+       -------------------------------------------------------- */
+
+    if (
+        latencySamples.length >
+        MAX_LATENCY_SAMPLES
+    ) {
+
+        latencySamples.shift();
+
+    }
+
+
+    /* --------------------------------------------------------
+       Save records
+       -------------------------------------------------------- */
 
     try {
 
-        payload =
-            JSON.parse(event.data);
+        localStorage.setItem(
+            'smart_home_latency_samples',
+            JSON.stringify(
+                latencySamples
+            )
+        );
 
     } catch (error) {
 
         console.warn(
-            "WebSocket JSON parse error:",
+            'Could not save latency samples:',
+            error
+        );
+
+    }
+
+}
+
+
+/* ============================================================
+   LOAD SAVED LATENCY DATA
+   ============================================================ */
+
+function loadLatencySamples() {
+
+    try {
+
+        const saved =
+            localStorage.getItem(
+                'smart_home_latency_samples'
+            );
+
+
+        if (!saved) {
+
+            return;
+
+        }
+
+
+        const parsed =
+            JSON.parse(
+                saved
+            );
+
+
+        if (
+            Array.isArray(
+                parsed
+            )
+        ) {
+
+            latencySamples =
+                parsed;
+
+        }
+
+    } catch (error) {
+
+        console.warn(
+            'Could not load latency samples:',
+            error
+        );
+
+    }
+
+}
+
+
+/* ============================================================
+   LATENCY STATISTICS
+   ============================================================ */
+
+function getLatencyStatistics() {
+
+    if (
+        latencySamples.length === 0
+    ) {
+
+        return null;
+
+    }
+
+
+    const values =
+        latencySamples
+            .map(
+                sample =>
+                    Number(
+                        sample.latencyMs
+                    )
+            )
+            .filter(
+                value =>
+                    Number.isFinite(
+                        value
+                    )
+            );
+
+
+    if (
+        values.length === 0
+    ) {
+
+        return null;
+
+    }
+
+
+    /* --------------------------------------------------------
+       Sort
+       -------------------------------------------------------- */
+
+    const sorted =
+        [...values].sort(
+            (a, b) =>
+                a - b
+        );
+
+
+    /* --------------------------------------------------------
+       Average
+       -------------------------------------------------------- */
+
+    const sum =
+        values.reduce(
+            (total, value) =>
+                total + value,
+            0
+        );
+
+
+    const average =
+        sum /
+        values.length;
+
+
+    /* --------------------------------------------------------
+       Minimum
+       -------------------------------------------------------- */
+
+    const minimum =
+        sorted[0];
+
+
+    /* --------------------------------------------------------
+       Maximum
+       -------------------------------------------------------- */
+
+    const maximum =
+        sorted[
+            sorted.length - 1
+        ];
+
+
+    /* --------------------------------------------------------
+       P95
+       -------------------------------------------------------- */
+
+    const p95Index =
+        Math.ceil(
+            0.95 *
+            sorted.length
+        ) - 1;
+
+
+    const p95 =
+        sorted[
+            Math.max(
+                0,
+                p95Index
+            )
+        ];
+
+
+    /* --------------------------------------------------------
+       Standard deviation
+       -------------------------------------------------------- */
+
+    const variance =
+        values.reduce(
+            (sum, value) => {
+
+                const difference =
+                    value -
+                    average;
+
+                return (
+                    sum +
+                    (
+                        difference *
+                        difference
+                    )
+                );
+
+            },
+            0
+        ) /
+        values.length;
+
+
+    const standardDeviation =
+        Math.sqrt(
+            variance
+        );
+
+
+    return {
+
+        samples:
+            values.length,
+
+        average:
+            average,
+
+        minimum:
+            minimum,
+
+        maximum:
+            maximum,
+
+        p95:
+            p95,
+
+        standardDeviation:
+            standardDeviation
+
+    };
+
+}
+
+
+/* ============================================================
+   PRINT LATENCY STATISTICS
+   ============================================================ */
+
+function printLatencyStatistics() {
+
+    const stats =
+        getLatencyStatistics();
+
+
+    if (!stats) {
+
+        return;
+
+    }
+
+
+    console.log('');
+
+    console.log(
+        '========== LATENCY STATISTICS =========='
+    );
+
+
+    console.log(
+        'Samples:',
+        stats.samples
+    );
+
+
+    console.log(
+        'Average:',
+        stats.average.toFixed(2),
+        'ms'
+    );
+
+
+    console.log(
+        'Minimum:',
+        stats.minimum.toFixed(2),
+        'ms'
+    );
+
+
+    console.log(
+        'Maximum:',
+        stats.maximum.toFixed(2),
+        'ms'
+    );
+
+
+    console.log(
+        'P95:',
+        stats.p95.toFixed(2),
+        'ms'
+    );
+
+
+    console.log(
+        'Standard Deviation:',
+        stats.standardDeviation.toFixed(2),
+        'ms'
+    );
+
+
+    console.log(
+        '========================================'
+    );
+
+}
+
+
+/* ============================================================
+   HANDLE INCOMING WEBSOCKET MESSAGE
+   ============================================================ */
+
+function handleWebSocketMessage(event) {
+
+    if (
+        !event ||
+        !event.data
+    ) {
+
+        return;
+
+    }
+
+
+    let payload;
+
+
+    /* --------------------------------------------------------
+       Parse JSON
+       -------------------------------------------------------- */
+
+    try {
+
+        payload =
+            JSON.parse(
+                event.data
+            );
+
+    } catch (error) {
+
+        /*
+         * Ignore raw / non-JSON messages.
+         */
+
+        console.warn(
+            'Received non-JSON WebSocket message:',
             event.data
         );
 
         return;
+
     }
 
-    // console.log(
-    //     "PARSED WEBSOCKET MESSAGE:",
-    //     payload
-    // );
 
     if (
         !payload ||
         typeof payload !== 'object'
     ) {
+
         return;
+
     }
 
 
@@ -543,19 +1460,16 @@ function handleWebSocketMessage(event) {
        ======================================================== */
 
     if (
-        payload.type === 'relay_status'
+        payload.type ===
+        'relay_status'
     ) {
-
-        console.log(
-            "RELAY STATUS RECEIVED BY BROWSER:",
-            payload
-        );
 
         handleRelayStatus(
             payload
         );
 
         return;
+
     }
 
 
@@ -564,8 +1478,10 @@ function handleWebSocketMessage(event) {
        ======================================================== */
 
     if (
-        payload.type === 'industrial_sensor_data' ||
-        payload.type === 'smart_home_sensor_data'
+        payload.type ===
+            'industrial_sensor_data' ||
+        payload.type ===
+            'smart_home_sensor_data'
     ) {
 
         updateSensorData(
@@ -573,7 +1489,19 @@ function handleWebSocketMessage(event) {
         );
 
         return;
+
     }
+
+
+    /*
+     * Unknown message type
+     */
+
+    console.log(
+        'Ignored WebSocket message type:',
+        payload.type
+    );
+
 }
 
 
@@ -583,6 +1511,10 @@ function handleWebSocketMessage(event) {
 
 function connectWebSocket() {
 
+    /* --------------------------------------------------------
+       Clear previous reconnect timer
+       -------------------------------------------------------- */
+
     if (reconnectTimer) {
 
         clearTimeout(
@@ -590,19 +1522,29 @@ function connectWebSocket() {
         );
 
         reconnectTimer = null;
+
     }
+
 
     const url =
         getWebSocketUrl();
+
 
     console.log(
         `Connecting to WebSocket: ${url}`
     );
 
+
+    /* --------------------------------------------------------
+       Create WebSocket
+       -------------------------------------------------------- */
+
     try {
 
         socket =
-            new WebSocket(url);
+            new WebSocket(
+                url
+            );
 
     } catch (error) {
 
@@ -611,17 +1553,22 @@ function connectWebSocket() {
             error
         );
 
+
         updateConnectionStatus(
             'Disconnected'
         );
 
+
         scheduleReconnect();
 
         return;
+
     }
 
 
-    /* WebSocket OPEN */
+    /* --------------------------------------------------------
+       OPEN
+       -------------------------------------------------------- */
 
     socket.onopen =
         function () {
@@ -630,9 +1577,11 @@ function connectWebSocket() {
                 'WebSocket connected.'
             );
 
+
             updateConnectionStatus(
                 'Connected'
             );
+
 
             if (reconnectTimer) {
 
@@ -641,17 +1590,23 @@ function connectWebSocket() {
                 );
 
                 reconnectTimer = null;
+
             }
+
         };
 
 
-    /* WebSocket MESSAGE */
+    /* --------------------------------------------------------
+       MESSAGE
+       -------------------------------------------------------- */
 
     socket.onmessage =
         handleWebSocketMessage;
 
 
-    /* WebSocket ERROR */
+    /* --------------------------------------------------------
+       ERROR
+       -------------------------------------------------------- */
 
     socket.onerror =
         function (error) {
@@ -660,10 +1615,13 @@ function connectWebSocket() {
                 'WebSocket encountered an error:',
                 error
             );
+
         };
 
 
-    /* WebSocket CLOSE */
+    /* --------------------------------------------------------
+       CLOSE
+       -------------------------------------------------------- */
 
     socket.onclose =
         function () {
@@ -672,37 +1630,80 @@ function connectWebSocket() {
                 'WebSocket connection closed.'
             );
 
+
             updateConnectionStatus(
                 'Disconnected'
             );
 
+
             scheduleReconnect();
+
         };
+
 }
 
 
 /* ============================================================
-   RECONNECT
+   SCHEDULE RECONNECT
    ============================================================ */
 
 function scheduleReconnect() {
 
     if (reconnectTimer) {
+
         return;
+
     }
+
 
     reconnectTimer =
         setTimeout(
             () => {
 
-                reconnectTimer = null;
+                reconnectTimer =
+                    null;
+
 
                 connectWebSocket();
 
             },
             RECONNECT_DELAY_MS
         );
+
 }
+
+
+/* ============================================================
+   MOBILE / TAB RETURN RECONNECT
+   ============================================================ */
+
+document.addEventListener(
+    'visibilitychange',
+    () => {
+
+        if (
+            document.visibilityState ===
+            'visible'
+        ) {
+
+            if (
+                !socket ||
+                socket.readyState !==
+                    WebSocket.OPEN
+            ) {
+
+                console.log(
+                    'Page became visible. Reconnecting WebSocket...'
+                );
+
+                connectWebSocket();
+
+            }
+
+        }
+
+    }
+);
 
 
 /* ============================================================
@@ -713,7 +1714,16 @@ document.addEventListener(
     'DOMContentLoaded',
     () => {
 
-        /* Setup four relay switches */
+        /* ----------------------------------------------------
+           Load saved latency measurements
+           ---------------------------------------------------- */
+
+        loadLatencySamples();
+
+
+        /* ----------------------------------------------------
+           Setup four relay switches
+           ---------------------------------------------------- */
 
         for (
             let i = 1;
@@ -726,9 +1736,13 @@ document.addEventListener(
                     `relay-${i}`
                 );
 
+
             if (!toggle) {
+
                 continue;
+
             }
+
 
             toggle.addEventListener(
                 'change',
@@ -741,12 +1755,22 @@ document.addEventListener(
 
                 }
             );
+
         }
 
 
-        /* Connect to Node-RED */
+        /* ----------------------------------------------------
+           Initial WebSocket connection
+           ---------------------------------------------------- */
 
         connectWebSocket();
+
+
+        /* ----------------------------------------------------
+           Print saved statistics
+           ---------------------------------------------------- */
+
+        printLatencyStatistics();
 
     }
 );
